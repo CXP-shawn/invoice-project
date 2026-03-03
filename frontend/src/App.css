@@ -1,3 +1,44 @@
 #root {
   min-height: 100vh;
 }
+
+.invoice-action-btn {
+  border-radius: 6px !important;
+  transition: all 0.2s ease !important;
+  flex-shrink: 0;
+}
+.invoice-action-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+.invoice-action-btn:active {
+  transform: translateY(0);
+}
+
+/* 操作列：内边距、居中、防止溢出 */
+.invoice-action-cell {
+  padding: 8px 16px;
+  overflow: visible;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+/* 发票表格：居中、浅灰框线 */
+.invoice-table .ant-table-thead > tr > th,
+.invoice-table .ant-table-tbody > tr > td {
+  text-align: center !important;
+  border: 1px solid #d9d9d9 !important;
+}
+.invoice-table .ant-table-thead > tr > th {
+  background: #fafafa !important;
+  font-weight: 600;
+}
+.invoice-table .ant-table-container table {
+  border-collapse: collapse;
+}
+.invoice-table .ant-table {
+  border: 1px solid #d9d9d9;
+  border-radius: 6px;
+  overflow: hidden;
+}

@@ -4,7 +4,7 @@
 
 ## 功能
 
-- **上传**：支持 jpg、png、gif、bmp、webp 格式发票图片上传
+- **上传**：支持 jpg、png、gif、bmp、webp 图片及 PDF 格式发票上传
 - **识别**：OCR 提取发票关键要素（代码、号码、日期、销方、购方、金额等），与图片一同存储
 - **查询**：按日期范围检索、文字模糊查找、点击单条展示发票图片
 - **统计**：按日期+关键词统计，显示发票总张数和总金额
@@ -51,15 +51,25 @@ cd frontend && npm run dev
 
 访问 http://localhost:5173 使用系统。
 
-### 4. 启用真实 OCR（可选）
+### 4. 启用 Qwen-VL 视觉识别（推荐，识别更精准）
 
-安装 Python 3 和 PaddleOCR：
+在 [阿里云百炼](https://dashscope.console.aliyun.com/) 获取 API Key，在 `backend/.env` 中添加：
+
+```
+DASHSCOPE_API_KEY=sk-你的API密钥
+```
+
+配置后，系统将优先使用 Qwen-VL 视觉模型识别发票，价税合计等字段识别更准确。
+
+### 5. 启用 PaddleOCR（可选，免费）
+
+若未配置 Qwen-VL，可安装 Python 3 和 PaddleOCR：
 
 ```bash
 pip install paddleocr paddlepaddle
 ```
 
-安装后，上传的发票将使用 PaddleOCR 进行真实识别；未安装时使用模拟数据。
+未配置 Qwen-VL 且未安装 PaddleOCR 时使用模拟数据。
 
 ## 项目结构
 

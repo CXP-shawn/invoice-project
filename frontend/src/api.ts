@@ -57,3 +57,12 @@ export async function getStats(params: {
   });
   return data;
 }
+
+export async function deleteInvoice(id: number) {
+  await api.delete(`/invoices/${id}`);
+}
+
+export async function updateInvoice(id: number, data: Partial<Invoice>) {
+  const { data: res } = await api.put<{ success: boolean; data: Invoice }>(`/invoices/${id}`, data);
+  return res;
+}
