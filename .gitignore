@@ -10,6 +10,10 @@ env/
 .env.local
 .env.*.local
 
+# 上传文件
+uploads/*
+!uploads/.gitkeep
+
 # 构建输出
 dist/
 build/

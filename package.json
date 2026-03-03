@@ -1,0 +1,11 @@
+{
+  "name": "invoice-project",
+  "private": true,
+  "scripts": {
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "build:backend": "cd backend && npm run build",
+    "build:frontend": "cd frontend && npm run build",
+    "db:init": "mysql -u root -p < backend/sql/schema.sql"
+  }
+}
