@@ -10,15 +10,17 @@ const QWEN_MODEL = process.env.QWEN_VL_MODEL || 'qwen-vl-ocr-latest';
 /** 基础发票识别 prompt，不含 OCR 参考文本 */
 const INVOICE_PROMPT_BASE = `请识别这张中国增值税发票（含电子发票、专票、普票），提取所有关键信息。要求准确无误、不要遗漏、不要捏造。必须返回纯 JSON，不要有任何其他文字、说明或 markdown 标记。
 
-【发票布局参考】
-- 发票号码：通常在发票右上角，约8-20位
-- 开票日期：在发票号码附近
+【重要：发票号码和开票日期必填】
+- 发票号码：在发票右上角「发票号码」或「发票号码:」后面的数字，8-20位纯数字，如 28020000000000880512。勿与税号、发票代码混淆。
+- 开票日期：在「开票日期」或「开票日期:」后面的日期，格式如 2024年04月28日 或 2024-04-28，必须转为 YYYY-MM-DD 输出。通常在发票号码同一行或下一行。
+
+【其他布局】
 - 购买方/销方：左侧为购买方（名称、税号），右侧为销售方
-- 价税合计(小写)：在发票最底部，位于商品明细表格下方，是整张发票的总金额（如 ¥108.00），不是表格中某一行商品的金额
+- 价税合计(小写)：在发票最底部「价税合计(小写)」后的金额（如 ¥2680.00），不是表格中某一行商品的金额
 
 【字段说明】
-- invoice_number: 发票号码（8-20位）
-- invoice_date: 开票日期，格式 YYYY-MM-DD
+- invoice_number: 发票号码（「发票号码」后的8-20位数字，必填）
+- invoice_date: 开票日期（「开票日期」后的日期，YYYY-MM-DD 格式，必填）
 - seller_name: 销售方/销方名称（完整公司名）
 - seller_tax_id: 销售方统一社会信用代码/纳税人识别号（15-20位）
 - buyer_name: 购买方/购方名称（完整公司名）
@@ -62,8 +64,8 @@ export async function recognizeWithQwen(imagePath: string): Promise<OcrResult | 
     const base64 = buf.toString('base64');
     const imageUrl = `data:${mime};base64,${base64}`;
 
-    // 优先使用 qwen-vl-ocr-2025-11-20（Qwen3-VL 架构，文档解析更强）
-    const models = [QWEN_MODEL, 'qwen-vl-ocr-2025-11-20', 'qwen-vl-ocr-latest', 'qwen-vl-max-latest', 'qwen-vl-plus'];
+    // 优先主模型，失败时再试备用（减少重试以提速）
+    const models = [QWEN_MODEL, 'qwen-vl-ocr-latest'];
     let lastError = '';
     for (const model of models) {
       try {
@@ -87,15 +89,15 @@ export async function recognizeWithQwen(imagePath: string): Promise<OcrResult | 
                     type: 'image_url',
                     image_url: {
                       url: imageUrl,
-                      min_pixels: 32 * 32 * 3,
-                      max_pixels: 32 * 32 * 8192,
+                      min_pixels: 512 * 512,
+                      max_pixels: 2048 * 2048,
                     },
                   },
                   { type: 'text', text: INVOICE_PROMPT_BASE },
                 ],
               },
             ],
-            max_tokens: 1024,
+            max_tokens: 512,
           }),
         });
         const body = await res.text();
@@ -143,6 +145,40 @@ export function isQwenAvailable(): boolean {
   return !!DASHSCOPE_API_KEY?.trim();
 }
 
+/** 从 OCR 原始文本中提取发票号码、开票日期（兜底补全） */
+export function extractFromRawText(rawText: string): Partial<Pick<OcrResult, 'invoice_number' | 'invoice_date'>> {
+  const out: Partial<Pick<OcrResult, 'invoice_number' | 'invoice_date'>> = {};
+  if (!rawText?.trim()) return out;
+  // 优先在「发票号码」附近查找
+  const numNearLabel = rawText.match(/发票号码[^\d]*(\d{8,20})/);
+  if (numNearLabel) {
+    out.invoice_number = numNearLabel[1];
+  } else {
+    const nums = rawText.match(/\d{8,20}/g);
+    if (nums) {
+      const candidates = nums.filter((n) => n.length >= 8 && n.length <= 20);
+      if (candidates.length > 0) {
+        out.invoice_number = candidates[0];
+      }
+    }
+  }
+  const dateMatch = rawText.match(/(\d{4})[年\-/]?(\d{1,2})[月\-/]?(\d{1,2})/);
+  if (dateMatch) {
+    out.invoice_date = `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`;
+  }
+  return out;
+}
+
+/** 用 OCR 文本补全结果中的空字段 */
+export function fillFromOcrText(result: OcrResult, rawText: string): OcrResult {
+  const extracted = extractFromRawText(rawText);
+  return {
+    ...result,
+    invoice_number: result.invoice_number?.trim() || extracted.invoice_number || result.invoice_number,
+    invoice_date: result.invoice_date?.trim() || extracted.invoice_date || result.invoice_date,
+  };
+}
+
 /** 判断识别结果是否不完整（关键字段缺失） */
 export function isOcrResultIncomplete(r: OcrResult | null): boolean {
   if (!r) return true;
@@ -169,7 +205,7 @@ export async function recognizeWithQwenAndOcrRef(
     const imageUrl = `data:${mime};base64,${base64}`;
     const prompt = buildPromptWithOcrRef(ocrText);
 
-    const models = [QWEN_MODEL, 'qwen-vl-ocr-2025-11-20', 'qwen-vl-ocr-latest', 'qwen-vl-max-latest'];
+    const models = [QWEN_MODEL, 'qwen-vl-ocr-latest'];
     for (const model of models) {
       try {
         const res = await fetch(`${DASHSCOPE_BASE}/chat/completions`, {
@@ -192,15 +228,15 @@ export async function recognizeWithQwenAndOcrRef(
                     type: 'image_url',
                     image_url: {
                       url: imageUrl,
-                      min_pixels: 32 * 32 * 3,
-                      max_pixels: 32 * 32 * 8192,
+                      min_pixels: 512 * 512,
+                      max_pixels: 2048 * 2048,
                     },
                   },
                   { type: 'text', text: prompt },
                 ],
               },
             ],
-            max_tokens: 1024,
+            max_tokens: 512,
           }),
         });
         const body = await res.text();

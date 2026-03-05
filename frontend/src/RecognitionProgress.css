@@ -1,0 +1,124 @@
+.recognition-progress-modal .ant-modal-content {
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.recognition-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.recognition-image-wrap {
+  background: #f5f5f5;
+  border-radius: 8px;
+  overflow: hidden;
+  min-height: 320px;
+}
+
+.recognition-image-container {
+  position: relative;
+  width: 100%;
+  max-height: 420px;
+  line-height: 0;
+}
+
+.recognition-image {
+  width: 100%;
+  height: auto;
+  max-height: 420px;
+  object-fit: contain;
+  display: block;
+  vertical-align: top;
+}
+
+/* 定位红框 */
+.recognition-box {
+  position: absolute;
+  border: 2px solid rgba(255, 77, 79, 0.6);
+  border-radius: 4px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.3s ease, box-shadow 0.3s ease;
+}
+
+.recognition-box.active {
+  opacity: 1;
+  border-color: #ff4d4f;
+  box-shadow: 0 0 0 2px rgba(255, 77, 79, 0.3);
+  animation: recognition-box-pulse 1s ease-in-out infinite;
+}
+
+.recognition-box.done {
+  opacity: 0.5;
+  border-color: #52c41a;
+}
+
+@keyframes recognition-box-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 2px rgba(255, 77, 79, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(255, 77, 79, 0.15);
+  }
+}
+
+.recognition-placeholder {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  color: #8c8c8c;
+  font-size: 15px;
+}
+
+/* 识别结果输出区 */
+.recognition-output {
+  background: #fafafa;
+  border: 1px solid #e8e8e8;
+  border-radius: 8px;
+  padding: 16px 20px;
+}
+
+.recognition-output-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #262626;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #e8e8e8;
+}
+
+.recognition-output-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px 24px;
+}
+
+.recognition-output-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  opacity: 0.4;
+  transition: opacity 0.3s ease;
+}
+
+.recognition-output-item.visible {
+  opacity: 1;
+}
+
+.recognition-output-label {
+  font-size: 13px;
+  color: #8c8c8c;
+  flex-shrink: 0;
+  min-width: 72px;
+}
+
+.recognition-output-value {
+  font-size: 14px;
+  color: #262626;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

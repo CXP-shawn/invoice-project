@@ -24,10 +24,12 @@ export function getImageUrl(path: string): string {
   return `/uploads/${path}`;
 }
 
+export type OcrBoxes = Record<string, [number, number, number, number]>;
+
 export async function uploadInvoice(file: File) {
   const form = new FormData();
   form.append('file', file);
-  const { data } = await api.post<{ success: boolean; data: Invoice }>('/invoices/upload', form, {
+  const { data } = await api.post<{ success: boolean; data: Invoice; boxes?: OcrBoxes }>('/invoices/upload', form, {
     headers: { 'Content-Type': 'multipart/form-data' },
   });
   return data;
