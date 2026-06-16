@@ -49,3 +49,12 @@ coverage/
 .nyc_output/
 htmlcov/
 .coverage
+
+# 工具/技能产物（非项目代码）
+.agents/
+skills-lock.json
+.cursor/
+
+# 课程资料（非项目代码）
+*.pptx
+期末评分标准.txt

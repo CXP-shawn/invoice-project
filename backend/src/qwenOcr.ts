@@ -5,7 +5,9 @@ import type { OcrResult } from './ocr.js';
 
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
 const DASHSCOPE_BASE = process.env.DASHSCOPE_BASE_URL || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
-const QWEN_MODEL = process.env.QWEN_VL_MODEL || 'qwen-vl-ocr-latest';
+const QWEN_MODEL = process.env.QWEN_VL_MODEL || 'qwen3.5-omni-plus';
+/** 主模型失败时的兜底模型（按需调整） */
+const FALLBACK_MODEL = process.env.QWEN_FALLBACK_MODEL || 'qwen-vl-ocr-latest';
 
 /** 基础发票识别 prompt，不含 OCR 参考文本 */
 const INVOICE_PROMPT_BASE = `请识别这张中国增值税发票（含电子发票、专票、普票），提取所有关键信息。要求准确无误、不要遗漏、不要捏造。必须返回纯 JSON，不要有任何其他文字、说明或 markdown 标记。
@@ -47,98 +49,162 @@ function safeNum(n: unknown): number {
   return !isNaN(v) && isFinite(v) && v >= 0 && v < 1e7 ? v : 0;
 }
 
+/** 是否为 Qwen-Omni 全模态模型（需走流式 + modalities） */
+function isOmniModel(model: string): boolean {
+  return /omni/i.test(model);
+}
+
+/** 读取图片并转为 data URL */
+function buildImageDataUrl(imagePath: string): string {
+  const buf = fs.readFileSync(imagePath);
+  const ext = path.extname(imagePath).toLowerCase();
+  const mime = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
+  return `data:${mime};base64,${buf.toString('base64')}`;
+}
+
 /**
- * 使用 Qwen-VL 视觉模型识别发票
+ * 统一调用 DashScope（OpenAI 兼容模式）。
+ * - Omni 模型：强制 stream:true + modalities:["text"]，解析 SSE 累积文本
+ * - 其他模型（qwen-vl-ocr / qwen3.x）：非流式，读取 message.content
+ * 返回模型输出的纯文本（失败返回 null）
+ */
+async function callQwenModel(model: string, imageUrl: string, promptText: string): Promise<string | null> {
+  const omni = isOmniModel(model);
+  const imageContent = omni
+    ? { type: 'image_url', image_url: { url: imageUrl } }
+    : { type: 'image_url', image_url: { url: imageUrl, min_pixels: 512 * 512, max_pixels: 2048 * 2048 } };
+
+  const body: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: 'system', content: '你是专业的发票识别助手。只返回JSON，不要其他内容。' },
+      {
+        role: 'user',
+        content: [imageContent, { type: 'text', text: promptText }],
+      },
+    ],
+    max_tokens: 1024,
+  };
+  if (omni) {
+    body.stream = true;
+    body.modalities = ['text'];
+  }
+
+  let res: Response;
+  try {
+    res = await fetch(`${DASHSCOPE_BASE}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
+      },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    console.error(`[Qwen] [${model}] 请求异常:`, e instanceof Error ? e.message : e);
+    return null;
+  }
+
+  const raw = await res.text();
+  if (!res.ok) {
+    console.error(`[Qwen] [${model}] ${res.status}: ${raw.slice(0, 200)}`);
+    return null;
+  }
+
+  if (omni) {
+    // 解析 SSE：累积 choices[0].delta.content
+    let out = '';
+    for (const line of raw.split('\n')) {
+      const s = line.trim();
+      if (!s.startsWith('data:')) continue;
+      const payload = s.slice(5).trim();
+      if (payload === '[DONE]') continue;
+      try {
+        const j = JSON.parse(payload) as { choices?: { delta?: { content?: string } }[] };
+        const c = j?.choices?.[0]?.delta?.content;
+        if (c) out += c;
+      } catch {
+        /* 忽略非 JSON 行 */
+      }
+    }
+    return out.trim() || null;
+  }
+
+  try {
+    const data = JSON.parse(raw) as {
+      choices?: { message?: { content?: string } }[];
+      error?: { message?: string };
+    };
+    if (data?.error) {
+      console.error(`[Qwen] [${model}] ${data.error.message || JSON.stringify(data.error)}`);
+      return null;
+    }
+    return data?.choices?.[0]?.message?.content?.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** 从模型输出文本中解析发票 JSON（兼容 ```json 包裹与多余文字） */
+function parseInvoiceJson(text: string, model: string): OcrResult | null {
+  const cleaned = text.replace(/```json\s*/gi, '').replace(/```/g, '').trim();
+  const match = cleaned.match(/\{[\s\S]*\}/);
+  if (!match) return null;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(match[0]) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+  return {
+    invoice_number: String(parsed.invoice_number || '').slice(0, 50) || undefined,
+    invoice_date: String(parsed.invoice_date || '').slice(0, 20) || undefined,
+    seller_name: String(parsed.seller_name || '').slice(0, 200) || undefined,
+    seller_tax_id: String(parsed.seller_tax_id || '').slice(0, 50) || undefined,
+    buyer_name: String(parsed.buyer_name || '').slice(0, 200) || undefined,
+    buyer_tax_id: String(parsed.buyer_tax_id || '').slice(0, 50) || undefined,
+    amount: safeNum(parsed.amount),
+    tax_amount: safeNum(parsed.tax_amount),
+    total_amount: safeNum(parsed.total_amount),
+    goods_name: String(parsed.goods_name || '').slice(0, 500) || undefined,
+    raw_text: `[${model}] ${text.slice(0, 500)}`,
+  };
+}
+
+/** 候选模型列表（主模型 + 兜底，去重） */
+function modelCandidates(): string[] {
+  return [...new Set([QWEN_MODEL, FALLBACK_MODEL])];
+}
+
+/**
+ * 使用 Qwen 视觉/全模态模型识别发票
  * 需配置 DASHSCOPE_API_KEY
  */
 export async function recognizeWithQwen(imagePath: string): Promise<OcrResult | null> {
   if (!DASHSCOPE_API_KEY?.trim()) {
-    console.log('[Qwen-VL] 已跳过（未配置 DASHSCOPE_API_KEY）');
+    console.log('[Qwen] 已跳过（未配置 DASHSCOPE_API_KEY）');
     return null;
   }
-  console.log('[Qwen-VL] 正在调用识别接口...');
+  console.log('[Qwen] 正在调用识别接口...');
+  let imageUrl: string;
   try {
-    const buf = fs.readFileSync(imagePath);
-    const ext = path.extname(imagePath).toLowerCase();
-    const mime = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
-    const base64 = buf.toString('base64');
-    const imageUrl = `data:${mime};base64,${base64}`;
-
-    // 优先主模型，失败时再试备用（减少重试以提速）
-    const models = [QWEN_MODEL, 'qwen-vl-ocr-latest'];
-    let lastError = '';
-    for (const model of models) {
-      try {
-        const res = await fetch(`${DASHSCOPE_BASE}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              {
-                role: 'system',
-                content: [{ type: 'text', text: '你是专业的发票识别助手。只返回JSON，不要其他内容。' }],
-              },
-              {
-                role: 'user',
-                content: [
-                  {
-                    type: 'image_url',
-                    image_url: {
-                      url: imageUrl,
-                      min_pixels: 512 * 512,
-                      max_pixels: 2048 * 2048,
-                    },
-                  },
-                  { type: 'text', text: INVOICE_PROMPT_BASE },
-                ],
-              },
-            ],
-            max_tokens: 512,
-          }),
-        });
-        const body = await res.text();
-        if (!res.ok) {
-          lastError = `[${model}] ${res.status}: ${body.slice(0, 200)}`;
-          continue;
-        }
-        const data = JSON.parse(body) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
-        if (data?.error) {
-          lastError = `[${model}] ${data.error.message || JSON.stringify(data.error)}`;
-          continue;
-        }
-        const text = data?.choices?.[0]?.message?.content?.trim();
-        if (!text) continue;
-
-        const jsonStr = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-        const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-        console.log('[Qwen-VL] 识别成功, model:', model);
-        return {
-          invoice_number: String(parsed.invoice_number || '').slice(0, 50) || undefined,
-          invoice_date: String(parsed.invoice_date || '').slice(0, 20) || undefined,
-          seller_name: String(parsed.seller_name || '').slice(0, 200) || undefined,
-          seller_tax_id: String(parsed.seller_tax_id || '').slice(0, 50) || undefined,
-          buyer_name: String(parsed.buyer_name || '').slice(0, 200) || undefined,
-          buyer_tax_id: String(parsed.buyer_tax_id || '').slice(0, 50) || undefined,
-          amount: safeNum(parsed.amount),
-          tax_amount: safeNum(parsed.tax_amount),
-          total_amount: safeNum(parsed.total_amount),
-          goods_name: String(parsed.goods_name || '').slice(0, 500) || undefined,
-          raw_text: `[Qwen-VL] ${text.slice(0, 500)}`,
-        };
-      } catch (parseErr) {
-        lastError = `[${model}] ${parseErr instanceof Error ? parseErr.message : 'parse failed'}`;
-      }
-    }
-    console.error('[Qwen-VL] All models failed:', lastError);
-    return null;
+    imageUrl = buildImageDataUrl(imagePath);
   } catch (e) {
-    console.error('[Qwen-VL]', e);
+    console.error('[Qwen] 读取图片失败:', e instanceof Error ? e.message : e);
     return null;
   }
+
+  for (const model of modelCandidates()) {
+    const text = await callQwenModel(model, imageUrl, INVOICE_PROMPT_BASE);
+    if (!text) continue;
+    const result = parseInvoiceJson(text, model);
+    if (result) {
+      console.log('[Qwen] 识别成功, model:', model);
+      return result;
+    }
+  }
+  console.error('[Qwen] 所有候选模型均未返回有效结果');
+  return null;
 }
 
 export function isQwenAvailable(): boolean {
@@ -197,78 +263,21 @@ export async function recognizeWithQwenAndOcrRef(
   ocrText: string
 ): Promise<OcrResult | null> {
   if (!DASHSCOPE_API_KEY?.trim() || !ocrText?.trim()) return null;
+  let imageUrl: string;
   try {
-    const buf = fs.readFileSync(imagePath);
-    const ext = path.extname(imagePath).toLowerCase();
-    const mime = ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
-    const base64 = buf.toString('base64');
-    const imageUrl = `data:${mime};base64,${base64}`;
-    const prompt = buildPromptWithOcrRef(ocrText);
-
-    const models = [QWEN_MODEL, 'qwen-vl-ocr-latest'];
-    for (const model of models) {
-      try {
-        const res = await fetch(`${DASHSCOPE_BASE}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              {
-                role: 'system',
-                content: [{ type: 'text', text: '你是专业的发票识别助手。结合OCR参考文本和图片，纠正错误、补全遗漏。只返回JSON。' }],
-              },
-              {
-                role: 'user',
-                content: [
-                  {
-                    type: 'image_url',
-                    image_url: {
-                      url: imageUrl,
-                      min_pixels: 512 * 512,
-                      max_pixels: 2048 * 2048,
-                    },
-                  },
-                  { type: 'text', text: prompt },
-                ],
-              },
-            ],
-            max_tokens: 512,
-          }),
-        });
-        const body = await res.text();
-        if (!res.ok) continue;
-        const data = JSON.parse(body) as { choices?: { message?: { content?: string } }[]; error?: { message?: string } };
-        if (data?.error) continue;
-        const text = data?.choices?.[0]?.message?.content?.trim();
-        if (!text) continue;
-
-        const jsonStr = text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-        const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-        console.log('[Qwen-VL] 混合模式识别成功, model:', model);
-        return {
-          invoice_number: String(parsed.invoice_number || '').slice(0, 50) || undefined,
-          invoice_date: String(parsed.invoice_date || '').slice(0, 20) || undefined,
-          seller_name: String(parsed.seller_name || '').slice(0, 200) || undefined,
-          seller_tax_id: String(parsed.seller_tax_id || '').slice(0, 50) || undefined,
-          buyer_name: String(parsed.buyer_name || '').slice(0, 200) || undefined,
-          buyer_tax_id: String(parsed.buyer_tax_id || '').slice(0, 50) || undefined,
-          amount: safeNum(parsed.amount),
-          tax_amount: safeNum(parsed.tax_amount),
-          total_amount: safeNum(parsed.total_amount),
-          goods_name: String(parsed.goods_name || '').slice(0, 500) || undefined,
-          raw_text: `[Qwen-VL+OCR] ${text.slice(0, 500)}`,
-        };
-      } catch {
-        continue;
-      }
-    }
-    return null;
-  } catch (e) {
-    console.error('[Qwen-VL] 混合模式识别失败:', e);
+    imageUrl = buildImageDataUrl(imagePath);
+  } catch {
     return null;
   }
+  const prompt = buildPromptWithOcrRef(ocrText);
+  for (const model of modelCandidates()) {
+    const text = await callQwenModel(model, imageUrl, prompt);
+    if (!text) continue;
+    const result = parseInvoiceJson(text, `${model}+OCR`);
+    if (result) {
+      console.log('[Qwen] 混合模式识别成功, model:', model);
+      return result;
+    }
+  }
+  return null;
 }
